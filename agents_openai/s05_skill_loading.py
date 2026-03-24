@@ -19,12 +19,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 try:
+    from agents_openai.observability import create_observer
     from agents_openai.tools import (
         file_tools,
         function_tool,
         make_file_tool_functions,
     )
 except ImportError:
+    from observability import create_observer
     from tools import (
         file_tools,
         function_tool,
@@ -41,6 +43,7 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL"),
 )
 MODEL = os.environ["MODEL_ID"]
+OBSERVER = create_observer(agent_name="s05_skill_loading", model=MODEL)
 
 
 class SkillLoader:
@@ -136,6 +139,12 @@ def parse_tool_input(tool_call) -> dict:
 
 
 def agent_loop(messages: list):
+    user_input = ""
+    if messages and messages[-1].get("role") == "user":
+        user_input = str(messages[-1].get("content", ""))
+    trace_ctx = OBSERVER.start_trace(user_input=user_input, history_len=len(messages))
+    final_output = ""
+
     while True:
         response = client.chat.completions.create(
             model=MODEL,
@@ -158,8 +167,16 @@ def agent_loop(messages: list):
                 for tc in assistant.tool_calls
             ]
         messages.append(assistant_turn)
+        OBSERVER.on_model_response(
+            trace_ctx,
+            assistant_text=assistant.content or "",
+            tool_calls=assistant_turn.get("tool_calls", []),
+        )
 
         if not assistant.tool_calls:
+            final_output = assistant.content or ""
+            OBSERVER.finish_trace(trace_ctx, final_output=final_output)
+            OBSERVER.flush()
             return
 
         for tool_call in assistant.tool_calls:
@@ -172,6 +189,12 @@ def agent_loop(messages: list):
 
             print(f"\033[33m> {tool_call.function.name}\033[0m")
             print(str(output)[:200])
+            OBSERVER.on_tool_result(
+                trace_ctx,
+                tool_name=tool_call.function.name,
+                tool_input=tool_input,
+                output=str(output),
+            )
             messages.append(
                 {
                     "role": "tool",

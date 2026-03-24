@@ -15,12 +15,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 try:
+    from agents_openai.observability import create_observer
     from agents_openai.tools import (
         file_tools,
         function_tool,
         make_file_tool_functions,
     )
 except ImportError:
+    from observability import create_observer
     from tools import (
         file_tools,
         function_tool,
@@ -36,6 +38,7 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL"),
 )
 MODEL = os.environ["MODEL_ID"]
+OBSERVER = create_observer(agent_name="s03_todo_write", model=MODEL)
 
 WORKDIR = Path.cwd()
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
@@ -132,6 +135,12 @@ TOOLS = file_tools() + [
 
 def agent_loop(messages: list):
     # -- The core pattern: a while loop that calls tools until the model stops --
+    user_input = ""
+    if messages and messages[-1].get("role") == "user":
+        user_input = str(messages[-1].get("content", ""))
+    trace_ctx = OBSERVER.start_trace(user_input=user_input, history_len=len(messages))
+    final_output = ""
+
     rounds_since_todo = 0
     while True:
         # 1) 让模型在当前消息上下文下做一次决策（回答或发起工具调用）。
@@ -157,9 +166,18 @@ def agent_loop(messages: list):
                 for tc in assistant.tool_calls
             ]
         messages.append(assistant_turn)
+        tool_calls_payload = assistant_turn.get("tool_calls", [])
+        OBSERVER.on_model_response(
+            trace_ctx,
+            assistant_text=assistant.content or "",
+            tool_calls=tool_calls_payload,
+        )
 
         # 3) 如果这轮没有工具调用，说明模型决定直接收敛，循环结束。
         if not assistant.tool_calls:
+            final_output = assistant.content or ""
+            OBSERVER.finish_trace(trace_ctx, final_output=final_output)
+            OBSERVER.flush()
             return
 
         # 4) 执行模型请求的工具，并把 tool 结果回填到消息历史中。
@@ -178,6 +196,12 @@ def agent_loop(messages: list):
 
             print(f"\033[33m> {tool_call.function.name}\033[0m")
             print(str(output)[:200])
+            OBSERVER.on_tool_result(
+                trace_ctx,
+                tool_name=tool_call.function.name,
+                tool_input=tool_input,
+                output=str(output),
+            )
             messages.append(
                 {
                     "role": "tool",
