@@ -4,6 +4,7 @@
 from copy import deepcopy
 from pathlib import Path
 import subprocess
+from typing import Callable
 
 
 MAX_TOOL_OUTPUT_CHARS = 50000
@@ -129,3 +130,29 @@ def run_edit(path: str, old_text: str, new_text: str, workdir: Path) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+
+def make_file_tool_functions(
+    workdir: Path,
+) -> tuple[
+    Callable[[str], Path],
+    Callable[[str], str],
+    Callable[[str, int | None], str],
+    Callable[[str, str], str],
+    Callable[[str, str, str], str],
+]:
+    def _safe_path(p: str) -> Path:
+        return safe_path(workdir, p)
+
+    def _run_bash(command: str) -> str:
+        return run_bash(command, workdir)
+
+    def _run_read(path: str, limit: int | None = None) -> str:
+        return run_read(path, workdir, limit)
+
+    def _run_write(path: str, content: str) -> str:
+        return run_write(path, content, workdir)
+
+    def _run_edit(path: str, old_text: str, new_text: str) -> str:
+        return run_edit(path, old_text, new_text, workdir)
+
+    return _safe_path, _run_bash, _run_read, _run_write, _run_edit

@@ -16,20 +16,12 @@ from openai import OpenAI
 try:
     from agents_openai.tools import (
         file_tools,
-        run_bash as shared_run_bash,
-        run_edit as shared_run_edit,
-        run_read as shared_run_read,
-        run_write as shared_run_write,
-        safe_path as shared_safe_path,
+        make_file_tool_functions,
     )
 except ImportError:
     from tools import (
         file_tools,
-        run_bash as shared_run_bash,
-        run_edit as shared_run_edit,
-        run_read as shared_run_read,
-        run_write as shared_run_write,
-        safe_path as shared_safe_path,
+        make_file_tool_functions,
     )
 
 # 加载 .env，便于本地通过环境变量注入模型与密钥配置。
@@ -48,25 +40,7 @@ SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, d
 # 暴露多个工具：bash、读文件、写文件、编辑文件。
 TOOLS = file_tools()
 
-
-def safe_path(p: str) -> Path:
-    return shared_safe_path(WORKDIR, p)
-
-
-def run_bash(command: str) -> str:
-    return shared_run_bash(command, WORKDIR)
-
-
-def run_read(path: str, limit: int | None = None) -> str:
-    return shared_run_read(path, WORKDIR, limit)
-
-
-def run_write(path: str, content: str) -> str:
-    return shared_run_write(path, content, WORKDIR)
-
-
-def run_edit(path: str, old_text: str, new_text: str) -> str:
-    return shared_run_edit(path, old_text, new_text, WORKDIR)
+safe_path, run_bash, run_read, run_write, run_edit = make_file_tool_functions(WORKDIR)
 
 
 # 工具分发表：将模型请求的工具名映射到本地处理函数。
