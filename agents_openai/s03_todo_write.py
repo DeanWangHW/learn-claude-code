@@ -10,11 +10,30 @@ The loop from s02 stays the same. We add:
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+try:
+    from agents_openai.tools import (
+        file_tools,
+        function_tool,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
+except ImportError:
+    from tools import (
+        file_tools,
+        function_tool,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
 
 # 加载 .env，便于本地通过环境变量注入模型与密钥配置。
 load_dotenv(override=True)
@@ -82,66 +101,23 @@ TODO = TodoManager()
 
 
 def safe_path(p: str) -> Path:
-    # 只允许访问工作区内路径，防止路径穿越到仓库外。
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
+    return shared_safe_path(WORKDIR, p)
 
 
 def run_bash(command: str) -> str:
-    # 最小安全防护：拦截高危命令，避免误删系统或关机等操作。
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-
-    try:
-        # 在当前工作目录执行命令，并限制超时，防止任务无限挂起。
-        r = subprocess.run(
-            command,
-            shell=True,
-            cwd=WORKDIR,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        out = (r.stdout + r.stderr).strip()
-        # 控制返回长度，避免把超长日志直接塞回上下文。
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+    return shared_run_bash(command, WORKDIR)
 
 
 def run_read(path: str, limit: int | None = None) -> str:
-    try:
-        lines = safe_path(path).read_text().splitlines()
-        if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
-        return "\n".join(lines)[:50000]
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_read(path, WORKDIR, limit)
 
 
 def run_write(path: str, content: str) -> str:
-    try:
-        fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
-        return f"Wrote {len(content)} bytes"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_write(path, content, WORKDIR)
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
-    try:
-        fp = safe_path(path)
-        content = fp.read_text()
-        if old_text not in content:
-            return f"Error: Text not found in {path}"
-        fp.write_text(content.replace(old_text, new_text, 1))
-        return f"Edited {path}"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_edit(path, old_text, new_text, WORKDIR)
 
 
 # 工具分发表：将模型请求的工具名映射到本地处理函数。
@@ -153,93 +129,30 @@ TOOL_HANDLERS = {
     "todo": lambda **kw: TODO.update(kw["items"]),
 }
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a shell command.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read file contents.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["path"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to file.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                "required": ["path", "content"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Replace exact text in file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "old_text": {"type": "string"},
-                    "new_text": {"type": "string"},
-                },
-                "required": ["path", "old_text", "new_text"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "todo",
-            "description": "Update task list. Track progress on multi-step tasks.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "text": {"type": "string"},
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "completed"],
-                                },
-                            },
-                            "required": ["id", "text", "status"],
-                            "additionalProperties": False,
+TOOLS = file_tools() + [
+    function_tool(
+        "todo",
+        "Update task list. Track progress on multi-step tasks.",
+        {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "completed"],
                         },
                     },
+                    "required": ["id", "text", "status"],
+                    "additionalProperties": False,
                 },
-                "required": ["items"],
-                "additionalProperties": False,
             },
         },
-    },
+        ["items"],
+    )
 ]
 
 

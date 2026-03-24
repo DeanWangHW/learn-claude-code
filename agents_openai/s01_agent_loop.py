@@ -25,11 +25,15 @@ policy, hooks, and lifecycle controls on top.
 """
 
 import os
-import subprocess
 import json
+from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
+try:
+    from agents_openai.tools import bash_tool, run_bash as shared_run_bash
+except ImportError:
+    from tools import bash_tool, run_bash as shared_run_bash
 
 # 加载 .env，便于本地通过环境变量注入模型与密钥配置。
 load_dotenv(override=True)
@@ -44,35 +48,11 @@ MODEL = os.environ["MODEL_ID"]
 SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 # 声明给模型可用的工具，这里只暴露一个 bash 执行器。
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "bash",
-        "description": "Run a shell command.",
-        "parameters": {
-            "type": "object",
-            "properties": {"command": {"type": "string"}},
-            "required": ["command"],
-            "additionalProperties": False,
-        },
-    },
-}]
+TOOLS = [bash_tool()]
 
 
 def run_bash(command: str) -> str:
-    # 最小安全防护：拦截高危命令，避免误删系统或关机等操作。
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-    try:
-        # 在当前工作目录执行命令，并限制超时，防止任务无限挂起。
-        r = subprocess.run(command, shell=True, cwd=os.getcwd(),
-                           capture_output=True, text=True, timeout=120)
-        out = (r.stdout + r.stderr).strip()
-        # 控制返回长度，避免把超长日志直接塞回上下文。
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+    return shared_run_bash(command, Path.cwd())
 
 
 # -- The core pattern: a while loop that calls tools until the model stops --

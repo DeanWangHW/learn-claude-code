@@ -9,11 +9,28 @@ The loop from s01 stays the same. We only expand:
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+try:
+    from agents_openai.tools import (
+        file_tools,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
+except ImportError:
+    from tools import (
+        file_tools,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
 
 # 加载 .env，便于本地通过环境变量注入模型与密钥配置。
 load_dotenv(override=True)
@@ -29,133 +46,27 @@ WORKDIR = Path.cwd()
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
 
 # 暴露多个工具：bash、读文件、写文件、编辑文件。
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Run a shell command.",
-            "parameters": {
-                "type": "object",
-                "properties": {"command": {"type": "string"}},
-                "required": ["command"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read file contents.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "limit": {"type": "integer"},
-                },
-                "required": ["path"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Replace exact text in a file once.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "old_text": {"type": "string"},
-                    "new_text": {"type": "string"},
-                },
-                "required": ["path", "old_text", "new_text"],
-                "additionalProperties": False,
-            },
-        },
-    },
-]
+TOOLS = file_tools()
 
 
 def safe_path(p: str) -> Path:
-    # 只允许访问工作区内路径，防止路径穿越到仓库外。
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
+    return shared_safe_path(WORKDIR, p)
 
 
 def run_bash(command: str) -> str:
-    # 最小安全防护：拦截高危命令，避免误删系统或关机等操作。
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-    try:
-        # 在当前工作目录执行命令，并限制超时，防止任务无限挂起。
-        r = subprocess.run(
-            command,
-            shell=True,
-            cwd=WORKDIR,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        out = (r.stdout + r.stderr).strip()
-        # 控制返回长度，避免把超长日志直接塞回上下文。
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+    return shared_run_bash(command, WORKDIR)
 
 
 def run_read(path: str, limit: int | None = None) -> str:
-    try:
-        text = safe_path(path).read_text()
-        lines = text.splitlines()
-        if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
-        return "\n".join(lines)[:50000]
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_read(path, WORKDIR, limit)
 
 
 def run_write(path: str, content: str) -> str:
-    try:
-        fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
-        return f"Wrote {len(content)} bytes to {path}"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_write(path, content, WORKDIR)
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
-    try:
-        fp = safe_path(path)
-        content = fp.read_text()
-        if old_text not in content:
-            return f"Error: Text not found in {path}"
-        fp.write_text(content.replace(old_text, new_text, 1))
-        return f"Edited {path}"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_edit(path, old_text, new_text, WORKDIR)
 
 
 # 工具分发表：将模型请求的工具名映射到本地处理函数。

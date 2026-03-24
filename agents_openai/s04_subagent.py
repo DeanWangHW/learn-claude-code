@@ -9,11 +9,30 @@ context, sharing the filesystem, then returns only a summary to the parent.
 
 import json
 import os
-import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+try:
+    from agents_openai.tools import (
+        file_tools,
+        function_tool,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
+except ImportError:
+    from tools import (
+        file_tools,
+        function_tool,
+        run_bash as shared_run_bash,
+        run_edit as shared_run_edit,
+        run_read as shared_run_read,
+        run_write as shared_run_write,
+        safe_path as shared_safe_path,
+    )
 
 load_dotenv(override=True)
 
@@ -35,61 +54,23 @@ SUBAGENT_SYSTEM = (
 
 
 def safe_path(p: str) -> Path:
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {p}")
-    return path
+    return shared_safe_path(WORKDIR, p)
 
 
 def run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-    try:
-        r = subprocess.run(
-            command,
-            shell=True,
-            cwd=WORKDIR,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+    return shared_run_bash(command, WORKDIR)
 
 
 def run_read(path: str, limit: int | None = None) -> str:
-    try:
-        lines = safe_path(path).read_text().splitlines()
-        if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
-        return "\n".join(lines)[:50000]
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_read(path, WORKDIR, limit)
 
 
 def run_write(path: str, content: str) -> str:
-    try:
-        fp = safe_path(path)
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(content)
-        return f"Wrote {len(content)} bytes"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_write(path, content, WORKDIR)
 
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
-    try:
-        fp = safe_path(path)
-        content = fp.read_text()
-        if old_text not in content:
-            return f"Error: Text not found in {path}"
-        fp.write_text(content.replace(old_text, new_text, 1))
-        return f"Edited {path}"
-    except Exception as e:
-        return f"Error: {e}"
+    return shared_run_edit(path, old_text, new_text, WORKDIR)
 
 
 TOOL_HANDLERS = {
@@ -100,52 +81,7 @@ TOOL_HANDLERS = {
 }
 
 
-def function_tool(name: str, description: str, properties: dict, required: list[str]):
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": False,
-            },
-        },
-    }
-
-
-CHILD_TOOLS = [
-    function_tool(
-        "bash",
-        "Run a shell command.",
-        {"command": {"type": "string"}},
-        ["command"],
-    ),
-    function_tool(
-        "read_file",
-        "Read file contents.",
-        {"path": {"type": "string"}, "limit": {"type": "integer"}},
-        ["path"],
-    ),
-    function_tool(
-        "write_file",
-        "Write content to file.",
-        {"path": {"type": "string"}, "content": {"type": "string"}},
-        ["path", "content"],
-    ),
-    function_tool(
-        "edit_file",
-        "Replace exact text in file.",
-        {
-            "path": {"type": "string"},
-            "old_text": {"type": "string"},
-            "new_text": {"type": "string"},
-        },
-        ["path", "old_text", "new_text"],
-    ),
-]
+CHILD_TOOLS = file_tools()
 
 PARENT_TOOLS = CHILD_TOOLS + [
     function_tool(
