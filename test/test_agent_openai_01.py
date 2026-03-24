@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 import types
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +37,17 @@ def _load_module():
 
     with patch.dict(sys.modules, {"openai": fake_openai, "dotenv": fake_dotenv}):
         spec.loader.exec_module(module)
+    return module
+
+
+def _load_module_real():
+    spec = importlib.util.spec_from_file_location(
+        "agents_openai_s01_agent_loop_real",
+        TARGET_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
     return module
 
 
@@ -86,6 +98,52 @@ class TestAgentOpenAI01(unittest.TestCase):
 
         self.assertEqual(call_kwargs[0]["messages"][0]["role"], "system")
         self.assertEqual(call_kwargs[1]["messages"][-1]["role"], "tool")
+
+    def test_real_openai_list_python_files_in_directory(self):
+        if os.getenv("RUN_OPENAI_REAL_TEST") != "1":
+            self.skipTest("Set RUN_OPENAI_REAL_TEST=1 to enable real OpenAI integration test")
+        if importlib.util.find_spec("openai") is None:
+            self.skipTest("openai package is not installed")
+
+        if importlib.util.find_spec("dotenv") is not None:
+            from dotenv import load_dotenv
+
+            load_dotenv(override=True)
+
+        if not os.getenv("OPENAI_API_KEY"):
+            self.skipTest("OPENAI_API_KEY is required for real OpenAI integration test")
+        os.environ.setdefault("MODEL_ID", os.getenv("OPENAI_REAL_MODEL", "gpt-4.1-mini"))
+
+        module = _load_module_real()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            (tmp / "alpha.py").write_text("print('alpha')\n", encoding="utf-8")
+            (tmp / "beta.py").write_text("print('beta')\n", encoding="utf-8")
+            (tmp / "notes.txt").write_text("not python\n", encoding="utf-8")
+
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                module.SYSTEM = (
+                    f"You are a coding agent at {os.getcwd()}. "
+                    "Use bash to solve tasks. Act, don't explain."
+                )
+                history = [{"role": "user", "content": "List all Python files in this directory"}]
+                module.agent_loop(history)
+            finally:
+                os.chdir(old_cwd)
+
+            response = history[-1].get("content", "")
+            self.assertTrue(response.strip(), "Empty assistant response from real API")
+
+            expected_py_files = sorted(p.name for p in tmp.glob("*.py"))
+            missing = [name for name in expected_py_files if name not in response]
+            self.assertFalse(
+                missing,
+                f"Missing files in model response: {missing}. Response: {response!r}",
+            )
+            self.assertNotIn("notes.txt", response)
 
 
 if __name__ == "__main__":
