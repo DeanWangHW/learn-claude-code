@@ -3,6 +3,7 @@
 
 import types
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from agents_openai.observability.langfuse_observer import (
@@ -68,6 +69,15 @@ class _FakeLangfuseModule(types.SimpleNamespace):
     pass
 
 
+_PROPAGATE_CALLS = []
+
+
+@contextmanager
+def _fake_propagate_attributes(**kwargs):
+    _PROPAGATE_CALLS.append(kwargs)
+    yield
+
+
 class TestLangfuseObserver(unittest.TestCase):
     def test_create_observer_returns_noop_without_keys(self):
         with patch.dict(
@@ -83,7 +93,10 @@ class TestLangfuseObserver(unittest.TestCase):
         self.assertIsInstance(observer, NoopObserver)
 
     def test_create_observer_returns_langfuse_observer_with_keys(self):
-        fake_module = _FakeLangfuseModule(Langfuse=_FakeLangfuseClient)
+        fake_module = _FakeLangfuseModule(
+            Langfuse=_FakeLangfuseClient,
+            propagate_attributes=_fake_propagate_attributes,
+        )
         with patch.dict("sys.modules", {"langfuse": fake_module}):
             with patch.dict(
                 "os.environ",
@@ -101,7 +114,11 @@ class TestLangfuseObserver(unittest.TestCase):
         self.assertIsNotNone(_FakeLangfuseClient.last_instance)
 
     def test_langfuse_observer_lifecycle_uses_v4_observation_api(self):
-        fake_module = _FakeLangfuseModule(Langfuse=_FakeLangfuseClient)
+        _PROPAGATE_CALLS.clear()
+        fake_module = _FakeLangfuseModule(
+            Langfuse=_FakeLangfuseClient,
+            propagate_attributes=_fake_propagate_attributes,
+        )
 
         with patch.dict("sys.modules", {"langfuse": fake_module}):
             with patch.dict(
@@ -119,6 +136,9 @@ class TestLangfuseObserver(unittest.TestCase):
         ctx = observer.start_trace(user_input="list files", history_len=3)
         self.assertIsNotNone(ctx)
         self.assertIsNotNone(ctx.root_observation)
+        self.assertEqual(ctx.trace_name, "s01_agent_loop: list files")
+        self.assertTrue(_PROPAGATE_CALLS)
+        self.assertEqual(_PROPAGATE_CALLS[-1].get("trace_name"), "s01_agent_loop: list files")
 
         observer.on_model_response(
             ctx,
