@@ -335,6 +335,74 @@
     },
     {
       "id": "s07",
+      "filename": "s07_1_task_system.py",
+      "title": "Tasks",
+      "subtitle": "Task Graph + Dependencies",
+      "loc": 240,
+      "tools": [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get",
+        "task_delete"
+      ],
+      "newTools": [
+        "task_create",
+        "task_update",
+        "task_list",
+        "task_get",
+        "task_delete"
+      ],
+      "coreAddition": "TaskManager with file-based state + dependency graph",
+      "keyInsight": "A file-based task graph with ordering, parallelism, and dependencies -- the coordination backbone for multi-agent work",
+      "classes": [
+        {
+          "name": "TaskManager",
+          "startLine": 47,
+          "endLine": 162
+        }
+      ],
+      "functions": [
+        {
+          "name": "safe_path",
+          "signature": "def safe_path(p: str)",
+          "startLine": 167
+        },
+        {
+          "name": "run_bash",
+          "signature": "def run_bash(command: str)",
+          "startLine": 173
+        },
+        {
+          "name": "run_read",
+          "signature": "def run_read(path: str, limit: int = None)",
+          "startLine": 185
+        },
+        {
+          "name": "run_write",
+          "signature": "def run_write(path: str, content: str)",
+          "startLine": 194
+        },
+        {
+          "name": "run_edit",
+          "signature": "def run_edit(path: str, old_text: str, new_text: str)",
+          "startLine": 203
+        },
+        {
+          "name": "agent_loop",
+          "signature": "def agent_loop(messages: list)",
+          "startLine": 249
+        }
+      ],
+      "layer": "planning",
+      "source": "#!/usr/bin/env python3\n# Harness: persistent tasks -- goals that outlive any single conversation.\n\"\"\"\ns07_1_task_system.py - Tasks + Delete\n\nTasks persist as JSON files in .tasks/ so they survive context compression.\nEach task has a dependency graph (blockedBy/blocks).\n\n    .tasks/\n      task_1.json  {\"id\":1, \"subject\":\"...\", \"status\":\"completed\", ...}\n      task_2.json  {\"id\":2, \"blockedBy\":[1], \"status\":\"pending\", ...}\n      task_3.json  {\"id\":3, \"blockedBy\":[2], \"blocks\":[], ...}\n\n    Dependency resolution:\n    +----------+     +----------+     +----------+\n    | task 1   | --> | task 2   | --> | task 3   |\n    | complete |     | blocked  |     | blocked  |\n    +----------+     +----------+     +----------+\n         |                ^\n         +--- completing task 1 removes it from task 2's blockedBy\n\nKey insight: \"State that survives compression -- because it's outside the conversation.\"\n\"\"\"\n\nimport json\nimport os\nimport subprocess\nfrom pathlib import Path\n\nfrom anthropic import Anthropic\nfrom dotenv import load_dotenv\n\nload_dotenv(override=True)\n\nif os.getenv(\"ANTHROPIC_BASE_URL\"):\n    os.environ.pop(\"ANTHROPIC_AUTH_TOKEN\", None)\n\nWORKDIR = Path.cwd()\nclient = Anthropic(base_url=os.getenv(\"ANTHROPIC_BASE_URL\"))\nMODEL = os.environ[\"MODEL_ID\"]\nTASKS_DIR = WORKDIR / \".tasks\"\n\nSYSTEM = f\"You are a coding agent at {WORKDIR}. Use task tools to plan and track work.\"\n\n\n# -- TaskManager: CRUD with dependency graph, persisted as JSON files --\nclass TaskManager:\n    def __init__(self, tasks_dir: Path):\n        self.dir = tasks_dir\n        self.dir.mkdir(exist_ok=True)\n        self._next_id = self._max_id() + 1\n\n    def _max_id(self) -> int:\n        ids = [int(f.stem.split(\"_\")[1]) for f in self.dir.glob(\"task_*.json\")]\n        return max(ids) if ids else 0\n\n    def _load(self, task_id: int) -> dict:\n        path = self.dir / f\"task_{task_id}.json\"\n        if not path.exists():\n            raise ValueError(f\"Task {task_id} not found\")\n        return json.loads(path.read_text())\n\n    def _save(self, task: dict):\n        path = self.dir / f\"task_{task['id']}.json\"\n        path.write_text(json.dumps(task, indent=2))\n\n    def create(self, subject: str, description: str = \"\") -> str:\n        task = {\n            \"id\": self._next_id, \"subject\": subject, \"description\": description,\n            \"status\": \"pending\", \"blockedBy\": [], \"blocks\": [], \"owner\": \"\",\n        }\n        self._save(task)\n        self._next_id += 1\n        return json.dumps(task, indent=2)\n\n    def get(self, task_id: int) -> str:\n        return json.dumps(self._load(task_id), indent=2)\n\n    def update(self, task_id: int, status: str = None,\n               add_blocked_by: list = None, add_blocks: list = None) -> str:\n        task = self._load(task_id)\n        if status:\n            if status not in (\"pending\", \"in_progress\", \"completed\"):\n                raise ValueError(f\"Invalid status: {status}\")\n            task[\"status\"] = status\n            # When a task is completed, remove it from all other tasks' blockedBy\n            if status == \"completed\":\n                self._clear_dependency(task_id)\n        if add_blocked_by:\n            task[\"blockedBy\"] = list(set(task[\"blockedBy\"] + add_blocked_by))\n        if add_blocks:\n            task[\"blocks\"] = list(set(task[\"blocks\"] + add_blocks))\n            # Bidirectional: also update the blocked tasks' blockedBy lists\n            for blocked_id in add_blocks:\n                try:\n                    blocked = self._load(blocked_id)\n                    if task_id not in blocked[\"blockedBy\"]:\n                        blocked[\"blockedBy\"].append(task_id)\n                        self._save(blocked)\n                except ValueError:\n                    pass\n        self._save(task)\n        return json.dumps(task, indent=2)\n\n    def _clear_dependency(self, completed_id: int):\n        \"\"\"Remove completed_id from all other tasks' blockedBy lists.\"\"\"\n        for f in self.dir.glob(\"task_*.json\"):\n            task = json.loads(f.read_text())\n            if completed_id in task.get(\"blockedBy\", []):\n                task[\"blockedBy\"].remove(completed_id)\n                self._save(task)\n\n    def list_all(self) -> str:\n        tasks = []\n        for f in sorted(self.dir.glob(\"task_*.json\")):\n            tasks.append(json.loads(f.read_text()))\n        if not tasks:\n            return \"No tasks.\"\n        lines = []\n        for t in tasks:\n            marker = {\"pending\": \"[ ]\", \"in_progress\": \"[>]\", \"completed\": \"[x]\"}.get(t[\"status\"], \"[?]\")\n            blocked = f\" (blocked by: {t['blockedBy']})\" if t.get(\"blockedBy\") else \"\"\n            lines.append(f\"{marker} #{t['id']}: {t['subject']}{blocked}\")\n        return \"\\n\".join(lines)\n\n    def delete(self, task_id: int, force: bool = False) -> str:\n        task = self._load(task_id)\n        if task[\"status\"] != \"completed\" and not force:\n            raise ValueError(f\"Task {task_id} is {task['status']}; set force=true to delete unfinished tasks\")\n\n        removed_from_blocked_by = []\n        removed_from_blocks = []\n        for f in self.dir.glob(\"task_*.json\"):\n            other = json.loads(f.read_text())\n            if other[\"id\"] == task_id:\n                continue\n\n            changed = False\n            if task_id in other.get(\"blockedBy\", []):\n                other[\"blockedBy\"] = [i for i in other.get(\"blockedBy\", []) if i != task_id]\n                removed_from_blocked_by.append(other[\"id\"])\n                changed = True\n\n            if task_id in other.get(\"blocks\", []):\n                other[\"blocks\"] = [i for i in other.get(\"blocks\", []) if i != task_id]\n                removed_from_blocks.append(other[\"id\"])\n                changed = True\n\n            if changed:\n                self._save(other)\n\n        (self.dir / f\"task_{task_id}.json\").unlink()\n        return json.dumps(\n            {\n                \"deleted\": task,\n                \"removedFromBlockedBy\": sorted(set(removed_from_blocked_by)),\n                \"removedFromBlocks\": sorted(set(removed_from_blocks)),\n            },\n            indent=2,\n        )\n\n\nTASKS = TaskManager(TASKS_DIR)\n\n\n# -- Base tool implementations --\ndef safe_path(p: str) -> Path:\n    path = (WORKDIR / p).resolve()\n    if not path.is_relative_to(WORKDIR):\n        raise ValueError(f\"Path escapes workspace: {p}\")\n    return path\n\ndef run_bash(command: str) -> str:\n    dangerous = [\"rm -rf /\", \"sudo\", \"shutdown\", \"reboot\", \"> /dev/\"]\n    if any(d in command for d in dangerous):\n        return \"Error: Dangerous command blocked\"\n    try:\n        r = subprocess.run(command, shell=True, cwd=WORKDIR,\n                           capture_output=True, text=True, timeout=120)\n        out = (r.stdout + r.stderr).strip()\n        return out[:50000] if out else \"(no output)\"\n    except subprocess.TimeoutExpired:\n        return \"Error: Timeout (120s)\"\n\ndef run_read(path: str, limit: int = None) -> str:\n    try:\n        lines = safe_path(path).read_text().splitlines()\n        if limit and limit < len(lines):\n            lines = lines[:limit] + [f\"... ({len(lines) - limit} more)\"]\n        return \"\\n\".join(lines)[:50000]\n    except Exception as e:\n        return f\"Error: {e}\"\n\ndef run_write(path: str, content: str) -> str:\n    try:\n        fp = safe_path(path)\n        fp.parent.mkdir(parents=True, exist_ok=True)\n        fp.write_text(content)\n        return f\"Wrote {len(content)} bytes\"\n    except Exception as e:\n        return f\"Error: {e}\"\n\ndef run_edit(path: str, old_text: str, new_text: str) -> str:\n    try:\n        fp = safe_path(path)\n        c = fp.read_text()\n        if old_text not in c:\n            return f\"Error: Text not found in {path}\"\n        fp.write_text(c.replace(old_text, new_text, 1))\n        return f\"Edited {path}\"\n    except Exception as e:\n        return f\"Error: {e}\"\n\n\nTOOL_HANDLERS = {\n    \"bash\":        lambda **kw: run_bash(kw[\"command\"]),\n    \"read_file\":   lambda **kw: run_read(kw[\"path\"], kw.get(\"limit\")),\n    \"write_file\":  lambda **kw: run_write(kw[\"path\"], kw[\"content\"]),\n    \"edit_file\":   lambda **kw: run_edit(kw[\"path\"], kw[\"old_text\"], kw[\"new_text\"]),\n    \"task_create\": lambda **kw: TASKS.create(kw[\"subject\"], kw.get(\"description\", \"\")),\n    \"task_update\": lambda **kw: TASKS.update(kw[\"task_id\"], kw.get(\"status\"), kw.get(\"addBlockedBy\"), kw.get(\"addBlocks\")),\n    \"task_list\":   lambda **kw: TASKS.list_all(),\n    \"task_get\":    lambda **kw: TASKS.get(kw[\"task_id\"]),\n    \"task_delete\": lambda **kw: TASKS.delete(kw[\"task_id\"], kw.get(\"force\", False)),\n}\n\nTOOLS = [\n    {\"name\": \"bash\", \"description\": \"Run a shell command.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}}, \"required\": [\"command\"]}},\n    {\"name\": \"read_file\", \"description\": \"Read file contents.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"path\"]}},\n    {\"name\": \"write_file\", \"description\": \"Write content to file.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"content\": {\"type\": \"string\"}}, \"required\": [\"path\", \"content\"]}},\n    {\"name\": \"edit_file\", \"description\": \"Replace exact text in file.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"path\": {\"type\": \"string\"}, \"old_text\": {\"type\": \"string\"}, \"new_text\": {\"type\": \"string\"}}, \"required\": [\"path\", \"old_text\", \"new_text\"]}},\n    {\"name\": \"task_create\", \"description\": \"Create a new task.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"subject\": {\"type\": \"string\"}, \"description\": {\"type\": \"string\"}}, \"required\": [\"subject\"]}},\n    {\"name\": \"task_update\", \"description\": \"Update a task's status or dependencies.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"task_id\": {\"type\": \"integer\"}, \"status\": {\"type\": \"string\", \"enum\": [\"pending\", \"in_progress\", \"completed\"]}, \"addBlockedBy\": {\"type\": \"array\", \"items\": {\"type\": \"integer\"}}, \"addBlocks\": {\"type\": \"array\", \"items\": {\"type\": \"integer\"}}}, \"required\": [\"task_id\"]}},\n    {\"name\": \"task_list\", \"description\": \"List all tasks with status summary.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {}}},\n    {\"name\": \"task_get\", \"description\": \"Get full details of a task by ID.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"task_id\": {\"type\": \"integer\"}}, \"required\": [\"task_id\"]}},\n    {\"name\": \"task_delete\", \"description\": \"Delete a task and clean dependency references. By default only completed tasks can be deleted.\",\n     \"input_schema\": {\"type\": \"object\", \"properties\": {\"task_id\": {\"type\": \"integer\"}, \"force\": {\"type\": \"boolean\"}}, \"required\": [\"task_id\"]}},\n]\n\n\ndef agent_loop(messages: list):\n    while True:\n        response = client.messages.create(\n            model=MODEL, system=SYSTEM, messages=messages,\n            tools=TOOLS, max_tokens=8000,\n        )\n        messages.append({\"role\": \"assistant\", \"content\": response.content})\n        if response.stop_reason != \"tool_use\":\n            return\n        results = []\n        for block in response.content:\n            if block.type == \"tool_use\":\n                handler = TOOL_HANDLERS.get(block.name)\n                try:\n                    output = handler(**block.input) if handler else f\"Unknown tool: {block.name}\"\n                except Exception as e:\n                    output = f\"Error: {e}\"\n                print(f\"> {block.name}: {str(output)[:200]}\")\n                results.append({\"type\": \"tool_result\", \"tool_use_id\": block.id, \"content\": str(output)})\n        messages.append({\"role\": \"user\", \"content\": results})\n\n\nif __name__ == \"__main__\":\n    history = []\n    while True:\n        try:\n            query = input(\"\\033[36ms07_1 >> \\033[0m\")\n        except (EOFError, KeyboardInterrupt):\n            break\n        if query.strip().lower() in (\"q\", \"exit\", \"\"):\n            break\n        history.append({\"role\": \"user\", \"content\": query})\n        agent_loop(history)\n        response_content = history[-1][\"content\"]\n        if isinstance(response_content, list):\n            for block in response_content:\n                if hasattr(block, \"text\"):\n                    print(block.text)\n        print()\n"
+    },
+    {
+      "id": "s07",
       "filename": "s07_task_system.py",
       "title": "Tasks",
       "subtitle": "Task Graph + Dependencies",
@@ -349,12 +417,7 @@
         "task_list",
         "task_get"
       ],
-      "newTools": [
-        "task_create",
-        "task_update",
-        "task_list",
-        "task_get"
-      ],
+      "newTools": [],
       "coreAddition": "TaskManager with file-based state + dependency graph",
       "keyInsight": "A file-based task graph with ordering, parallelism, and dependencies -- the coordination backbone for multi-agent work",
       "classes": [

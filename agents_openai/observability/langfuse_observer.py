@@ -19,7 +19,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+import importlib
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,10 +55,13 @@ class TraceContext:
         Langfuse 根 observation（通常是 span），为 ``None`` 表示当前未启用上报。
     turn : int, default=0
         当前会话已记录的模型轮次计数，用于按回合切分 generation 事件。
+    trace_name : str | None, default=None
+        当前 trace 的名称，用于在 Langfuse UI 中做检索与分组管理。
     """
 
     root_observation: Any | None
     turn: int = 0
+    trace_name: str | None = None
 
 
 class BaseObserver:
@@ -120,6 +126,7 @@ class LangfuseObserver(BaseObserver):
         self.agent_name = agent_name
         self.model = model
         self.client = None
+        self._propagate_attributes = None
         self.debug = _as_bool(os.getenv("LANGFUSE_DEBUG"))
 
         # 支持显式关闭：本地调试或 CI 无需监控时可设置 LANGFUSE_ENABLED=0。
@@ -136,7 +143,9 @@ class LangfuseObserver(BaseObserver):
             return
 
         try:
-            from langfuse import Langfuse
+            langfuse_module = importlib.import_module("langfuse")
+            Langfuse = getattr(langfuse_module, "Langfuse")
+            self._propagate_attributes = getattr(langfuse_module, "propagate_attributes", None)
         except Exception as e:
             self._log(f"disabled: import langfuse failed: {e}")
             return
@@ -162,6 +171,28 @@ class LangfuseObserver(BaseObserver):
         if self.debug:
             print(f"[langfuse] {message}")
 
+    def _build_trace_name(self, user_input: str) -> str:
+        """构造稳定、可检索的 trace 名称。
+
+        规则：
+        1. 默认前缀是 ``agent_name``，便于按脚本聚合。
+        2. 拼接用户输入首行摘要，提升检索可读性。
+        3. 仅保留 ASCII 可见字符，避免平台约束导致丢失。
+        4. 最大长度 200，符合 Langfuse 对 trace_name 的约束。
+        """
+        first_line = (user_input or "").strip().splitlines()[0] if user_input else ""
+        normalized = re.sub(r"\s+", " ", first_line).strip()
+        if normalized:
+            candidate = f"{self.agent_name}: {normalized}"
+        else:
+            candidate = self.agent_name
+
+        # 只保留 ASCII 可见字符，避免非法字符导致 trace_name 被忽略。
+        ascii_only = "".join(ch for ch in candidate if 32 <= ord(ch) <= 126)
+        if not ascii_only:
+            ascii_only = self.agent_name
+        return ascii_only[:200]
+
     def start_trace(self, user_input: str, history_len: int) -> TraceContext | None:
         """开始一次根 trace（root span）。
 
@@ -181,24 +212,32 @@ class LangfuseObserver(BaseObserver):
             return None
 
         root = None
+        trace_name = self._build_trace_name(user_input)
         try:
-            # 这里用 span 作为根 observation；后续 model/tool 事件挂在其下。
-            root = self.client.start_observation(
-                name=self.agent_name,
-                as_type="span",
-                input=user_input[:4000],
-                metadata={
-                    "model": self.model,
-                    "history_len": history_len,
-                },
-            )
+            # Langfuse v4 的 trace 名称需要通过 propagate_attributes 注入。
+            context_manager = nullcontext()
+            if self._propagate_attributes is not None:
+                context_manager = self._propagate_attributes(trace_name=trace_name)
+
+            with context_manager:
+                # 这里用 span 作为根 observation；后续 model/tool 事件挂在其下。
+                root = self.client.start_observation(
+                    name=self.agent_name,
+                    as_type="span",
+                    input=user_input[:4000],
+                    metadata={
+                        "model": self.model,
+                        "history_len": history_len,
+                        "trace_name": trace_name,
+                    },
+                )
             trace_id = getattr(root, "trace_id", None)
-            self._log(f"trace started: {trace_id}")
+            self._log(f"trace started: {trace_id}, trace_name={trace_name}")
         except Exception as e:
             self._log(f"start_trace failed: {e}")
             root = None
 
-        return TraceContext(root_observation=root)
+        return TraceContext(root_observation=root, trace_name=trace_name)
 
     def on_model_response(
         self,
