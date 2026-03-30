@@ -226,3 +226,4 @@ test_providers.py
 analysis/
 analysis_progress.md
 .team
+.worktrees
